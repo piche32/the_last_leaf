@@ -1,0 +1,72 @@
+name: 18:00 Deadline Checker
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-deadline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Submission Time (KST)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const createdAt = new Date(context.payload.pull_request.created_at);
+            
+            // UTC 시간에 9시간을 더해 KST(한국 표준시)로 변환
+            const kstTime = new Date(createdAt.getTime() + (9 * 60 * 60 * 1000));
+            
+            const dayOfWeek = kstTime.getUTCDay(); // 0: 일, 1: 월, 2: 화, 3: 수, 4: 목, 5: 금, 6: 토
+            const hours = kstTime.getUTCHours();
+            const minutes = kstTime.getUTCMinutes();
+            const seconds = kstTime.getUTCSeconds();
+            
+            const year = kstTime.getUTCFullYear();
+            const month = String(kstTime.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(kstTime.getUTCDate()).padStart(2, '0');
+            const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            
+            console.log(`PR 생성 시간 (KST): ${year}-${month}-${day} ${timeStr}`);
+            console.log(`요일 번호 (0~6): ${dayOfWeek}`);
+            
+            // 주말(토요일: 6, 일요일: 0)에 올린 PR은 스터디 대상 외 처리 (필요시 수정 가능)
+            if (dayOfWeek === 0 || dayOfWeek === 6) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `⚠️ **[주말 PR 안내]**\n\n- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n- 주말에 생성된 PR은 평일 데일리 스터디 마감 대상에 포함되지 않습니다.`
+              });
+              return;
+            }
+            
+            // 마감 기준: 18시 00분 00초 초과 시 실패 (지각)
+            // 즉, 시간이 18시 이후이거나, 18시 정각이라도 분/초가 0보다 크면 지각
+            const isLate = hours > 18 || (hours === 18 && (minutes > 0 || seconds > 0));
+            
+            let commentBody = "";
+            if (isLate) {
+              commentBody = `🚨 **[마감 초과 / 지각 판정]**\n\n` +
+                            `- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n` +
+                            `- **판정 결과:** ❌ **실패 (지각)**\n\n` +
+                            `> ⚖️ **스터디 규칙 적용:** 18시 00분 00초를 초과하여 제출되었습니다. 규칙에 따라 **50,000원**의 벌금이 부과되며, **당일 23:59까지** 모임통장으로 입금 완료 후 인증해 주세요!`;
+            } else {
+              commentBody = `✅ **[정시 제출 성공]**\n\n` +
+                            `- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n` +
+                            `- **판정 결과:** 🟢 **성공**\n\n` +
+                            `> 🎉 마감 시간(17:59:59) 이내에 정상적으로 제출되었습니다. 오늘도 고생하셨습니다! 서울 여행이 눈앞에 다가옵니다 ✈️`;
+            }
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
