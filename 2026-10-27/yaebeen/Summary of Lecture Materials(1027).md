@@ -1,7 +1,5 @@
 # [Backend] Servlet
 
----
-
 ## 1. 웹 프로그램 아키텍처 및 개발 환경
 
 ### 1.1. 프론트엔드와 백엔드의 역할 분담
@@ -17,9 +15,9 @@
 
 ```mermaid
 graph LR
-    A[Client] -->|정적 요청 (HTML, CSS)| B[Web Server \n Presentation Tier]
-    B -->|동적 요청| C[WAS / Servlet \n Application Tier]
-    C <-->|Query / Data| D[(Database MySQL \n Data Tier)]
+    A[Client] -->|"정적 요청 (HTML, CSS)"| B["Web Server <br> Presentation Tier"]
+    B -->|"동적 요청"| C["WAS / Servlet <br> Application Tier"]
+    C <-->|"Query / Data"| D[("Database MySQL <br> Data Tier")]
 ```
 
 ### 1.3. WAS, Container, Context의 관계
@@ -107,11 +105,11 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-    A[Client Request] -->|/main?action=gugu| B(Main Controller \n Front Controller)
-    B -->|1. 공통 전처리 \n Logging, Encoding| C{Action Param 파악}
-    C -->|gugu| D[gugu() \n 구구단 로직]
-    C -->|login| E[login() \n 로그인 로직]
-    D --> F[공통 후처리 및 HTML 응답]
+    A["Client Request"] -->|"/main?action=gugu"| B("Main Controller <br> Front Controller")
+    B -->|"1. 공통 전처리 <br> Logging, Encoding"| C{"Action Param 파악"}
+    C -->|"gugu"| D["gugu() <br> 구구단 로직"]
+    C -->|"login"| E["login() <br> 로그인 로직"]
+    D --> F["공통 후처리 및 HTML 응답"]
     E --> F
 ```
 
