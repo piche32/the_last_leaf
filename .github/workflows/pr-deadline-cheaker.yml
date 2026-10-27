@@ -1,4 +1,4 @@
-name: 18:00 Deadline Checker
+name: 18:00 Deadline Checker, Auto-Update & Auto-Merge
 
 on:
   pull_request:
@@ -7,66 +7,142 @@ on:
     types: [opened, reopened]
 
 permissions:
-  pull-requests: write
-  issues: write
+  contents: write       # 파일 수정 및 자동 커밋을 위해 필요
+  pull-requests: write  # PR 댓글 작성 및 자동 머지를 위해 필요
 
 jobs:
-  check-deadline:
+  check-update-and-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Check PR Submission Time (KST)
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Process PR, Update README and Data
         uses: actions/github-script@v7
         with:
           script: |
-            const createdAt = new Date(context.payload.pull_request.created_at);
+            const fs = require('fs');
             
-            // UTC 시간에 9시간을 더해 KST(한국 표준시)로 변환
+            // 1. study-data.json 읽기
+            const dataPath = '.github/study-data.json';
+            if (!fs.existsSync(dataPath)) {
+              console.log("study-data.json 파일이 존재하지 않습니다.");
+              return;
+            }
+            const studyData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+
+            // 2. PR 생성 시간 계산 (KST 변환)
+            const pr = context.payload.pull_request;
+            const senderId = pr.user.login.toLowerCase();
+            const createdAt = new Date(pr.created_at);
             const kstTime = new Date(createdAt.getTime() + (9 * 60 * 60 * 1000));
-            
-            const dayOfWeek = kstTime.getUTCDay(); // 0: 일, 1: 월, 2: 화, 3: 수, 4: 목, 5: 금, 6: 토
-            const hours = kstTime.getUTCHours();
-            const minutes = kstTime.getUTCMinutes();
-            const seconds = kstTime.getUTCSeconds();
             
             const year = kstTime.getUTCFullYear();
             const month = String(kstTime.getUTCMonth() + 1).padStart(2, '0');
             const day = String(kstTime.getUTCDate()).padStart(2, '0');
-            const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            const dateStr = `${year}-${month}-${day}`;
             
-            console.log(`PR 생성 시간 (KST): ${year}-${month}-${day} ${timeStr}`);
-            console.log(`요일 번호 (0~6): ${dayOfWeek}`);
+            const h = kstTime.getUTCHours();
+            const m = kstTime.getUTCMinutes();
+            const s = kstTime.getUTCSeconds();
+            const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
             
-            // 주말(토요일: 6, 일요일: 0)에 올린 PR은 스터디 대상 외 처리 (필요시 수정 가능)
+            // 주말 체크 (토: 6, 일: 0)
+            const dayOfWeek = kstTime.getUTCDay();
             if (dayOfWeek === 0 || dayOfWeek === 6) {
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: `⚠️ **[주말 PR 안내]**\n\n- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n- 주말에 생성된 PR은 평일 데일리 스터디 마감 대상에 포함되지 않습니다.`
-              });
+              console.log("주말에 생성된 PR은 출석 체크 대상이 아닙니다.");
               return;
             }
-            
-            // 마감 기준: 18시 00분 00초 초과 시 실패 (지각)
-            // 즉, 시간이 18시 이후이거나, 18시 정각이라도 분/초가 0보다 크면 지각
-            const isLate = hours > 18 || (hours === 18 && (minutes > 0 || seconds > 0));
-            
-            let commentBody = "";
-            if (isLate) {
-              commentBody = `🚨 **[마감 초과 / 지각 판정]**\n\n` +
-                            `- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n` +
-                            `- **판정 결과:** ❌ **실패 (지각)**\n\n` +
-                            `> ⚖️ **스터디 규칙 적용:** 18시 00분 00초를 초과하여 제출되었습니다. 규칙에 따라 **50,000원**의 벌금이 부과되며, **당일 23:59까지** 모임통장으로 입금 완료 후 인증해 주세요!`;
-            } else {
-              commentBody = `✅ **[정시 제출 성공]**\n\n` +
-                            `- **PR 생성 시간 (KST):** \`${year}-${month}-${day} ${timeStr}\`\n` +
-                            `- **판정 결과:** 🟢 **성공**\n\n` +
-                            `> 🎉 마감 시간(17:59:59) 이내에 정상적으로 제출되었습니다. 오늘도 고생하셨습니다! 서울 여행이 눈앞에 다가옵니다 ✈️`;
+
+            // 3. 18:00:00 초과 시 지각(실패) 판정
+            const isLate = h > 18 || (h === 18 && (m > 0 || s > 0));
+
+            // 4. 스터디원 데이터 갱신
+            let memberFound = false;
+            for (let member of studyData.members) {
+              if (member.githubId.toLowerCase() === senderId) {
+                memberFound = true;
+                if (isLate) {
+                  member.fail += 1;
+                  member.fine += 50000;
+                  member.attendance[dateStr] = "💸";
+                } else {
+                  member.success += 1;
+                  member.attendance[dateStr] = "✅";
+                }
+              }
             }
-            
+
+            if (!memberFound) {
+              console.log(`⚠️ 경고: GitHub ID '@${senderId}'가 study-data.json에 등록되어 있지 않습니다.`);
+            }
+
+            // JSON 파일 저장
+            fs.writeFileSync(dataPath, JSON.stringify(studyData, null, 2), 'utf8');
+
+            // 5. 마크다운 테이블 동적 생성
+            let statsTable = `| 이름 | GitHub ID | 성공 횟수 | 실패 횟수 | 누적 벌금 (기부액) | 상태 |\n| :---: | :---: | :---: | :---: | :---: | :---: |\n`;
+            studyData.members.forEach(m => {
+              statsTable += `| **${m.name}** | \`@${m.githubId}\` | ${m.success}회 | ${m.fail}회 | ${m.fine.toLocaleString()}원 | ${m.status} |\n`;
+            });
+
+            let allDates = new Set();
+            studyData.members.forEach(m => {
+              Object.keys(m.attendance || {}).forEach(d => allDates.add(d));
+            });
+            let sortedDates = Array.from(allDates).sort();
+
+            let attendanceTable = `| 이름 | ` + sortedDates.map(d => `${d}`).join(' | ') + ` |\n`;
+            attendanceTable += `| :---: | ` + sortedDates.map(() => `:---:`).join(' | ') + ` |\n`;
+            studyData.members.forEach(m => {
+              let row = `| **${m.name}** | `;
+              row += sortedDates.map(d => m.attendance[d] || "⬜").join(' | ');
+              row += ` |\n`;
+              attendanceTable += row;
+            });
+
+            // README.md 내용 교체
+            let readmePath = 'README.md';
+            let readmeContent = fs.readFileSync(readmePath, 'utf8');
+
+            const statsRegex = /<!--START_SECTION:stats-->[\s\S]*?<!--END_SECTION:stats-->/;
+            readmeContent = readmeContent.replace(statsRegex, `<!--START_SECTION:stats-->\n${statsTable}<!--END_SECTION:stats-->`);
+
+            const attendanceRegex = /<!--START_SECTION:attendance-->[\s\S]*?<!--END_SECTION:attendance-->/;
+            readmeContent = readmeContent.replace(attendanceRegex, `<!--START_SECTION:attendance-->\n${attendanceTable}<!--END_SECTION:attendance-->`);
+
+            fs.writeFileSync(readmePath, readmeContent, 'utf8');
+
+            // 6. PR 댓글 작성
+            const commentBody = isLate
+              ? `🚨 **[지각 판정]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** ❌ **실패 (지각)**\n> ⚖️ 18시 00분 00초를 초과하여 제출되었습니다. 규정에 따라 **50,000원**의 벌금이 부과됩니다!`
+              : `✅ **[정시 제출 성공]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** 🟢 **성공**\n> 🎉 마감 시간 이내에 정상적으로 제출되었습니다. 오늘도 고생하셨습니다!`;
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body: commentBody
+            });
+
+      - name: Commit updated README & Data to PR branch
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🎯 [Bot] 자동 출석 체크 및 현황판 갱신 완료"
+          file_pattern: README.md .github/study-data.json
+
+      - name: Wait for GitHub mergeability check
+        run: sleep 5  # 5초 대기
+
+      - name: Auto Merge PR into main
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'merge'
             });
