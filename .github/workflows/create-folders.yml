@@ -1,0 +1,47 @@
+name: Auto Create Weekly Folders
+
+on:
+  schedule:
+    # 매주 일요일 KST 23:00 실행 (UTC 기준 일요일 14:00)
+    - cron: '0 14 * * 0'
+  workflow_dispatch: # Actions 탭에서 수동으로 즉시 실행하고 싶을 때 사용
+
+jobs:
+  create-folders:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 레포지토리에 푸시할 수 있는 권한 부여
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create folders for the upcoming week (Mon-Fri)
+        run: |
+          # 기준 날짜: 실행일 기준 다음 날(월요일)부터 금요일까지 5일간 폴더 생성
+          for i in {1..5}; do
+            # 한국 시간(KST) 기준으로 날짜 계산
+            TARGET_DATE=$(TZ='Asia/Seoul' date -d "+$i day" +'%Y-%m-%d')
+            
+            # 폴더가 없으면 생성하고, 빈 폴더 커밋 유지를 위해 .gitkeep 생성
+            if [ ! -d "$TARGET_DATE" ]; then
+              mkdir -p "$TARGET_DATE"
+              touch "$TARGET_DATE/.gitkeep"
+              echo "Created folder: $TARGET_DATE"
+            fi
+          done
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add */.gitkeep
+          
+          # 변경사항이 있을 때만 커밋 및 푸시
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: auto-create weekly study folders [skip ci]"
+            git push
+          else
+            echo "No new folders to commit."
+          fi
