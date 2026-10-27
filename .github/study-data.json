@@ -1,0 +1,7 @@
+{
+  "members": [
+    { "name": "박소현", "githubId": "piche32", "success": 0, "fail": 0, "fine": 0, "status": "🟢 생존", "attendance": {} },
+    { "name": "도예빈", "githubId": "dohdoh1000", "success": 0, "fail": 0, "fine": 0, "status": "🟢 생존", "attendance": {} },
+    { "name": "이민정", "githubId": "TrixieL20", "success": 0, "fail": 0, "fine": 0, "status": "🟢 생존", "attendance": {} }
+  ]
+}
