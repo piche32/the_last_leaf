@@ -3,12 +3,13 @@
     {
       "name": "박소현",
       "githubId": "piche32",
-      "success": 1,
+      "success": 2,
       "fail": 0,
       "fine": 0,
       "status": "🟢 생존",
       "attendance": {
-        "2026-10-27": "✅"
+        "2026-10-27": "✅",
+        "2026-10-28": "✅"
       }
     },
     {
