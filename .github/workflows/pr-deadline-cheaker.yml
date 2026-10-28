@@ -6,34 +6,95 @@ on:
       - main
     types: [opened, reopened]
 
+# 동시 실행 방지: 여러 명이 동시에 PR을 올려도 1개씩 순차 실행 (충돌 방지)
+concurrency:
+  group: study-attendance-group
+  cancel-in-progress: false
+
 permissions:
-  contents: write       # 파일 수정 및 자동 커밋을 위해 필요
+  contents: write       # 파일 수정, 커밋, 브랜치 자동 삭제를 위해 필요
   pull-requests: write  # PR 댓글 작성 및 자동 머지를 위해 필요
 
 jobs:
   check-update-and-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout PR branch
+      # [1단계] 사용자 검증 및 출석 가능 여부 사전 체크 (실패 시 여기서 즉시 중단됨)
+      - name: Checkout main for validation
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: main
 
-      - name: Process PR, Update README and Data
+      - name: Validate PR and Member
+        id: validate
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            
-            // 1. study-data.json 읽기
             const dataPath = '.github/study-data.json';
+            
+            // 파일이 없으면 에러를 발생시켜 다음 단계(머지) 진행을 막음
             if (!fs.existsSync(dataPath)) {
-              console.log("study-data.json 파일이 존재하지 않습니다.");
+              core.setFailed("오류: .github/study-data.json 파일이 존재하지 않습니다.");
               return;
             }
+            
+            const studyData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+            const pr = context.payload.pull_request;
+            const senderId = pr.user.login.toLowerCase();
+            
+            // 등록된 스터디원인지 확인 (미등록 시 에러 발생 후 중단)
+            const member = studyData.members.find(m => m.githubId.toLowerCase() === senderId);
+            if (!member) {
+              core.setFailed(`오류: GitHub ID '@${senderId}'가 study-data.json에 등록되어 있지 않습니다.`);
+              return;
+            }
+
+            // 시간 계산 (KST)
+            const createdAt = new Date(pr.created_at);
+            const kstTime = new Date(createdAt.getTime() + (9 * 60 * 60 * 1000));
+            const dayOfWeek = kstTime.getUTCDay();
+            
+            // 주말 여부 출력 변수로 저장 (주말이면 에러는 아니지만 출석 체크만 건너뛰기 위함)
+            const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+            core.setOutput('is_weekend', isWeekend.toString());
+
+      # [2단계] PR을 main 브랜치에 병합 (충돌 등으로 실패 시 여기서 즉시 중단됨)
+      - name: Auto Merge PR into main
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                merge_method: 'merge'
+              });
+            } catch (error) {
+              // 머지 실패 시 명시적으로 워크플로우를 중단시켜 출석부가 잘못 업데이트되는 것을 방지
+              core.setFailed(`PR 자동 머지에 실패했습니다 (충돌 여부를 확인하세요): ${error.message}`);
+            }
+
+      # [3단계] 머지된 최신 main 브랜치 다시 불러오기
+      - name: Checkout updated main branch
+        if: steps.validate.outputs.is_weekend == 'false'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # [4단계] 출석 데이터 및 README.md 갱신 후 댓글 작성 (평일인 경우에만 작동)
+      - name: Update README, Data and Comment
+        if: steps.validate.outputs.is_weekend == 'false'
+        id: update_data
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const dataPath = '.github/study-data.json';
             const studyData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
 
-            // 2. PR 생성 시간 계산 (KST 변환)
             const pr = context.payload.pull_request;
             const senderId = pr.user.login.toLowerCase();
             const createdAt = new Date(pr.created_at);
@@ -48,22 +109,20 @@ jobs:
             const m = kstTime.getUTCMinutes();
             const s = kstTime.getUTCSeconds();
             const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-            
-            // 주말 체크 (토: 6, 일: 0)
-            const dayOfWeek = kstTime.getUTCDay();
-            if (dayOfWeek === 0 || dayOfWeek === 6) {
-              console.log("주말에 생성된 PR은 출석 체크 대상이 아닙니다.");
-              return;
-            }
 
-            // 3. 18:00:00 초과 시 지각(실패) 판정
             const isLate = h > 18 || (h === 18 && (m > 0 || s > 0));
 
-            // 4. 스터디원 데이터 갱신
-            let memberFound = false;
+            let alreadyChecked = false;
             for (let member of studyData.members) {
               if (member.githubId.toLowerCase() === senderId) {
-                memberFound = true;
+                if (!member.attendance) member.attendance = {};
+                
+                if (member.attendance[dateStr]) {
+                  alreadyChecked = true;
+                  console.log(`이미 ${dateStr} 출석 기록이 존재하여 통계를 중복 반영하지 않습니다.`);
+                  break;
+                }
+
                 if (isLate) {
                   member.fail += 1;
                   member.fine += 50000;
@@ -75,14 +134,11 @@ jobs:
               }
             }
 
-            if (!memberFound) {
-              console.log(`⚠️ 경고: GitHub ID '@${senderId}'가 study-data.json에 등록되어 있지 않습니다.`);
-            }
+            core.setOutput('already_checked', alreadyChecked.toString());
+            if (alreadyChecked) return;
 
-            // JSON 파일 저장
             fs.writeFileSync(dataPath, JSON.stringify(studyData, null, 2), 'utf8');
 
-            // 5. 마크다운 테이블 동적 생성
             let statsTable = `| 이름 | GitHub ID | 성공 횟수 | 실패 횟수 | 누적 벌금 (기부액) | 상태 |\n| :---: | :---: | :---: | :---: | :---: | :---: |\n`;
             studyData.members.forEach(m => {
               statsTable += `| **${m.name}** | \`@${m.githubId}\` | ${m.success}회 | ${m.fail}회 | ${m.fine.toLocaleString()}원 | ${m.status} |\n`;
@@ -98,12 +154,11 @@ jobs:
             attendanceTable += `| :---: | ` + sortedDates.map(() => `:---:`).join(' | ') + ` |\n`;
             studyData.members.forEach(m => {
               let row = `| **${m.name}** | `;
-              row += sortedDates.map(d => m.attendance[d] || "⬜").join(' | ');
+              row += sortedDates.map(d => (m.attendance && m.attendance[d]) || "⬜").join(' | ');
               row += ` |\n`;
               attendanceTable += row;
             });
 
-            // README.md 내용 교체
             let readmePath = 'README.md';
             let readmeContent = fs.readFileSync(readmePath, 'utf8');
 
@@ -115,10 +170,9 @@ jobs:
 
             fs.writeFileSync(readmePath, readmeContent, 'utf8');
 
-            // 6. PR 댓글 작성
             const commentBody = isLate
-              ? `🚨 **[지각 판정]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** ❌ **실패 (지각)**\n> ⚖️ 18시 00분 00초를 초과하여 제출되었습니다. 규정에 따라 **50,000원**의 벌금이 부과됩니다!`
-              : `✅ **[정시 제출 성공]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** 🟢 **성공**\n> 🎉 마감 시간 이내에 정상적으로 제출되었습니다. 오늘도 고생하셨습니다!`;
+              ? `**[지각 판정]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** **실패 (지각)**\n> 18시 00분 00초를 초과하여 제출되었습니다. 규정에 따라 **50,000원**의 벌금이 부과됩니다.`
+              : `**[정시 제출 성공]**\n- **PR 생성 시간 (KST):** \`${dateStr} ${timeStr}\`\n- **판정 결과:** **성공**\n> 마감 시간 이내에 정상적으로 제출되었습니다.`;
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -127,22 +181,28 @@ jobs:
               body: commentBody
             });
 
-      - name: Commit updated README & Data to PR branch
+      # [5단계] 변경된 README와 JSON을 main에 커밋 (평일이고 중복 제출이 아닐 때만 작동)
+      - name: Commit updated README & Data to main
+        if: steps.validate.outputs.is_weekend == 'false' && steps.update_data.outputs.already_checked == 'false'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🎯 [Bot] 자동 출석 체크 및 현황판 갱신 완료"
+          branch: main
+          commit_message: "[Bot] 자동 출석 체크 및 현황판 갱신 완료"
           file_pattern: README.md .github/study-data.json
 
-      - name: Wait for GitHub mergeability check
-        run: sleep 5  # 5초 대기
-
-      - name: Auto Merge PR into main
+      # [6단계] 머지가 완료된 PR 브랜치 자동 삭제 (앞 단계들이 모두 성공했을 때만 실행됨)
+      - name: Delete merged PR branch
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              merge_method: 'merge'
-            });
+            const branchName = context.payload.pull_request.head.ref;
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `heads/${branchName}`
+              });
+              console.log(`브랜치 '${branchName}'가 자동으로 삭제되었습니다.`);
+            } catch (error) {
+              console.log(`브랜치 삭제 중 오류 발생 (이미 삭제되었거나 권한 부족): ${error.message}`);
+            }
